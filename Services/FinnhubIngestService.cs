@@ -11,8 +11,9 @@ public class FinnhubIngestService : BackgroundService
     // simple in-memory cache; BroadcastService will read this
     public static ConcurrentDictionary<string, PriceTick> Latest = new();
     
-    // Symbols to subscribe to (you can make this configurable)
-    private readonly string[] _symbols = { "BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:ADAUSDT" };
+    // Symbols to subscribe to - using both Finnhub and Binance formats
+    private readonly string[] _finnhubSymbols = { "BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:ADAUSDT" };
+    private readonly string[] _binanceSymbols = { "btcusdt", "ethusdt", "adausdt" };
 
     public FinnhubIngestService(ILogger<FinnhubIngestService> logger, IServiceProvider sp, IConfiguration configuration)
     {
@@ -23,88 +24,169 @@ public class FinnhubIngestService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Get API key from configuration
-        var apiKey = _configuration["Finnhub:ApiKey"];
-        if (string.IsNullOrEmpty(apiKey))
+        // Start both Finnhub and Binance connections
+        var tasks = new List<Task>
         {
-            _logger.LogError("Finnhub API key not configured");
-            return;
-        }
+            ConnectToFinnhub(stoppingToken),
+            ConnectToBinance(stoppingToken)
+        };
 
-        var uri = new Uri($"wss://ws.finnhub.io?token={apiKey}");
+        await Task.WhenAny(tasks);
+    }
 
-        using var ws = new ClientWebSocket();
-        await ws.ConnectAsync(uri, stoppingToken);
-        _logger.LogInformation("Connected to Finnhub WebSocket");
-
-        // Subscribe to symbols
-        foreach (var symbol in _symbols)
+    private async Task ConnectToFinnhub(CancellationToken stoppingToken)
+    {
+        try
         {
-            var subscribeMessage = JsonSerializer.Serialize(new { type = "subscribe", symbol = symbol });
-            var messageBytes = Encoding.UTF8.GetBytes(subscribeMessage);
-            await ws.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, stoppingToken);
-            _logger.LogInformation($"Subscribed to {symbol}");
-        }
-
-        var buffer = new byte[8192];
-        while (!stoppingToken.IsCancellationRequested && ws.State == WebSocketState.Open)
-        {
-            var result = await ws.ReceiveAsync(buffer, stoppingToken);
-            if (result.MessageType == WebSocketMessageType.Close) break;
-            
-            var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-            _logger.LogDebug($"Received from Finnhub: {json}");
-            
-            try
+            var apiKey = _configuration["Finnhub:ApiKey"];
+            if (string.IsNullOrEmpty(apiKey))
             {
-                var doc = JsonDocument.Parse(json);
+                _logger.LogWarning("Finnhub API key not configured, skipping Finnhub connection");
+                return;
+            }
+
+            var uri = new Uri($"wss://ws.finnhub.io?token={apiKey}");
+
+            using var ws = new ClientWebSocket();
+            await ws.ConnectAsync(uri, stoppingToken);
+            _logger.LogInformation("Connected to Finnhub WebSocket");
+
+            // Subscribe to symbols
+            foreach (var symbol in _finnhubSymbols)
+            {
+                var subscribeMessage = JsonSerializer.Serialize(new { type = "subscribe", symbol = symbol });
+                var messageBytes = Encoding.UTF8.GetBytes(subscribeMessage);
+                await ws.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, stoppingToken);
+                _logger.LogInformation($"Subscribed to Finnhub {symbol}");
+            }
+
+            var buffer = new byte[8192];
+            while (!stoppingToken.IsCancellationRequested && ws.State == WebSocketState.Open)
+            {
+                var result = await ws.ReceiveAsync(buffer, stoppingToken);
+                if (result.MessageType == WebSocketMessageType.Close) break;
                 
-                // Handle subscription confirmation
-                if (doc.RootElement.TryGetProperty("type", out var type) && type.GetString() == "ping")
-                {
-                    // Send pong response
-                    var pongMessage = JsonSerializer.Serialize(new { type = "pong" });
-                    var pongBytes = Encoding.UTF8.GetBytes(pongMessage);
-                    await ws.SendAsync(new ArraySegment<byte>(pongBytes), WebSocketMessageType.Text, true, stoppingToken);
-                    continue;
-                }
+                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                _logger.LogDebug($"Received from Finnhub: {json}");
                 
-                // Handle price data
-                if (doc.RootElement.TryGetProperty("data", out var data))
+                try
                 {
-                    foreach (var item in data.EnumerateArray())
+                    var doc = JsonDocument.Parse(json);
+                    
+                    // Handle ping/pong
+                    if (doc.RootElement.TryGetProperty("type", out var type) && type.GetString() == "ping")
                     {
-                        if (item.TryGetProperty("s", out var symbolElement) && 
-                            item.TryGetProperty("p", out var priceElement))
+                        var pongMessage = JsonSerializer.Serialize(new { type = "pong" });
+                        var pongBytes = Encoding.UTF8.GetBytes(pongMessage);
+                        await ws.SendAsync(new ArraySegment<byte>(pongBytes), WebSocketMessageType.Text, true, stoppingToken);
+                        continue;
+                    }
+                    
+                    // Handle price data
+                    if (doc.RootElement.TryGetProperty("data", out var data))
+                    {
+                        foreach (var item in data.EnumerateArray())
                         {
-                            var symbol = symbolElement.GetString()!;
-                            var price = priceElement.GetDecimal();
-                            
-                            var tick = new PriceTick 
-                            { 
-                                Symbol = symbol, 
-                                Price = price, 
-                                Ts = DateTime.UtcNow 
-                            };
-                            
-                            Latest.AddOrUpdate(symbol, tick, (_, __) => tick);
-                            _logger.LogInformation($"Updated {symbol}: {price}");
-                            
-                            // Persist to DB
-                            using var scope = _sp.CreateScope();
-                            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-                            db.PriceTicks.Add(tick);
-                            await db.SaveChangesAsync();
+                            if (item.TryGetProperty("s", out var symbolElement) && 
+                                item.TryGetProperty("p", out var priceElement))
+                            {
+                                var symbol = symbolElement.GetString()!;
+                                var price = priceElement.GetDecimal();
+                                
+                                await ProcessPriceUpdate(symbol, price, "Finnhub");
+                            }
                         }
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error parsing Finnhub message: {Message}", json);
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error parsing Finnhub message: {Message}", json);
+                }
             }
         }
-        
-        _logger.LogInformation("Finnhub WebSocket connection closed");
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Finnhub connection failed");
+        }
+    }
+
+    private async Task ConnectToBinance(CancellationToken stoppingToken)
+    {
+        try
+        {
+            // Binance WebSocket doesn't require API key for public data
+            var streams = string.Join("/", _binanceSymbols.Select(s => $"{s}@ticker"));
+            var uri = new Uri($"wss://stream.binance.com:9443/ws/{streams}");
+            
+            using var ws = new ClientWebSocket();
+            await ws.ConnectAsync(uri, stoppingToken);
+            _logger.LogInformation("Connected to Binance WebSocket");
+
+            var buffer = new byte[8192];
+            while (!stoppingToken.IsCancellationRequested && ws.State == WebSocketState.Open)
+            {
+                var result = await ws.ReceiveAsync(buffer, stoppingToken);
+                if (result.MessageType == WebSocketMessageType.Close) break;
+                
+                var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                _logger.LogDebug($"Received from Binance: {json}");
+                
+                try
+                {
+                    var doc = JsonDocument.Parse(json);
+                    
+                    if (doc.RootElement.TryGetProperty("s", out var symbolElement) && 
+                        doc.RootElement.TryGetProperty("c", out var priceElement))
+                    {
+                        var symbol = $"BINANCE:{symbolElement.GetString()!.ToUpper()}";
+                        var price = priceElement.GetDecimal();
+                        
+                        await ProcessPriceUpdate(symbol, price, "Binance");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error parsing Binance message: {Message}", json);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Binance connection failed");
+        }
+    }
+
+    private async Task ProcessPriceUpdate(string symbol, decimal price, string source)
+    {
+        try
+        {
+            // Validate price is reasonable (not zero or negative)
+            if (price <= 0)
+            {
+                _logger.LogWarning($"Invalid price received from {source}: {symbol} = {price}");
+                return;
+            }
+
+            var tick = new PriceTick 
+            { 
+                Symbol = symbol, 
+                Price = price, 
+                Ts = DateTime.UtcNow 
+            };
+            
+            // Update cache
+            Latest.AddOrUpdate(symbol, tick, (_, __) => tick);
+            _logger.LogInformation($"Updated {symbol}: ${price:F2} (from {source})");
+            
+            // Persist to DB
+            using var scope = _sp.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.PriceTicks.Add(tick);
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing price update for {Symbol}", symbol);
+        }
     }
 }

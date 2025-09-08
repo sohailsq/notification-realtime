@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -13,29 +14,43 @@
             padding: 20px;
             background-color: #f5f5f5;
         }
+
         .container {
             background: white;
             padding: 20px;
             border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
         }
+
         .status {
             padding: 10px;
             margin: 10px 0;
             border-radius: 4px;
             font-weight: bold;
         }
-        .connected { background-color: #d4edda; color: #155724; }
-        .disconnected { background-color: #f8d7da; color: #721c24; }
-        .connecting { background-color: #fff3cd; color: #856404; }
-        
+
+        .connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+
+        .disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+
+        .connecting {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+
         .price-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 20px;
             margin-top: 20px;
         }
-        
+
         .price-card {
             background: #f8f9fa;
             border: 1px solid #dee2e6;
@@ -43,28 +58,28 @@
             padding: 15px;
             text-align: center;
         }
-        
+
         .price-card h3 {
             margin: 0 0 10px 0;
             color: #495057;
         }
-        
+
         .price {
             font-size: 24px;
             font-weight: bold;
             color: #28a745;
         }
-        
+
         .timestamp {
             font-size: 12px;
             color: #6c757d;
             margin-top: 5px;
         }
-        
+
         .controls {
             margin: 20px 0;
         }
-        
+
         button {
             background: #007bff;
             color: white;
@@ -74,16 +89,16 @@
             cursor: pointer;
             margin: 5px;
         }
-        
+
         button:hover {
             background: #0056b3;
         }
-        
+
         button:disabled {
             background: #6c757d;
             cursor: not-allowed;
         }
-        
+
         .log {
             background: #f8f9fa;
             border: 1px solid #dee2e6;
@@ -97,70 +112,117 @@
         }
     </style>
 </head>
+
 <body>
     <div class="container">
         <h1> Forex Notifications</h1>
-        
+
         <div id="status" class="status disconnected">Disconnected</div>
-        
+
+        <div id="latestPrice" class="price-card" style="margin-bottom: 20px;">
+            <h3>Latest Update</h3>
+            <div class="price">--</div>
+            <div class="timestamp">--</div>
+        </div>
+
         <div class="controls">
             <button id="connectBtn" onclick="connect()">Connect</button>
             <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
             <button onclick="subscribe('BINANCE:BTCUSDT')">Subscribe BTC</button>
             <button onclick="subscribe('BINANCE:ETHUSDT')">Subscribe ETH</button>
             <button onclick="subscribe('BINANCE:ADAUSDT')">Subscribe ADA</button>
+            <button onclick="verifyPrice('BINANCE:ETHUSDT')" style="background: #28a745;">Verify ETH Price</button>
         </div>
-        
+
         <div class="price-grid" id="priceGrid">
             <!-- Price cards will be added here dynamically -->
+            <!-- // Price need to be added from latest data -->
+            <p>
+                Click "Connect" to start receiving real-time Forex price updates. Use the "Subscribe" buttons to follow
+                specific currency pairs.
+            </p>
+
+
         </div>
-        
+
+
+
         <div class="log" id="log"></div>
+
     </div>
 
     <script>
         let connection = null;
         const priceData = {};
-        
+
         function log(message) {
             const logDiv = document.getElementById('log');
             const timestamp = new Date().toLocaleTimeString();
-            logDiv.innerHTML += `[${timestamp}] ${message}<br>`;
-            logDiv.scrollTop = logDiv.scrollHeight;
+            const newEntry = `[${timestamp}] ${message}<br>`;
+
+            // Prepend instead of append
+            logDiv.innerHTML = newEntry + logDiv.innerHTML;
         }
-        
+
         function updateStatus(status, className) {
             const statusDiv = document.getElementById('status');
             statusDiv.textContent = status;
             statusDiv.className = `status ${className}`;
         }
-        
+
         function updatePrice(symbol, price, timestamp) {
+            // Validate price data
+            if (!price || price <= 0 || isNaN(price)) {
+                log(`Invalid price received for ${symbol}: ${price}`);
+                return;
+            }
+
+            // Check if price change is reasonable (not more than 50% change in one update)
+            if (priceData[symbol]) {
+                const previousPrice = priceData[symbol].price;
+                const changePercent = Math.abs((price - previousPrice) / previousPrice) * 100;
+                if (changePercent > 50) {
+                    log(`Warning: Large price change for ${symbol}: ${previousPrice} -> ${price} (${changePercent.toFixed(2)}%)`);
+                }
+            }
+
             priceData[symbol] = { price, timestamp };
+
+            // Update the dedicated latest price section
+            const latestDiv = document.getElementById('latestPrice');
+            latestDiv.innerHTML = `
+        <h3>${symbol} (Latest)</h3>
+        <div class="price">$${price.toFixed(2)}</div>
+        <div class="timestamp">${new Date(timestamp).toLocaleTimeString()}</div>
+    `;
+
+            // Re-render the whole grid
             renderPrices();
         }
-        
+
         function renderPrices() {
             const grid = document.getElementById('priceGrid');
             grid.innerHTML = '';
-            
+
+
+            // Sort by latest timestamp (newest first)
             Object.entries(priceData).forEach(([symbol, data]) => {
                 const card = document.createElement('div');
                 card.className = 'price-card';
                 card.innerHTML = `
-                    <h3>${symbol}</h3>
-                    <div class="price">$${data.price.toFixed(2)}</div>
-                    <div class="timestamp">${new Date(data.timestamp).toLocaleTimeString()}</div>
-                `;
+            <h3>${symbol}</h3>
+            <div class="price">$${data.price.toFixed(2)}</div>
+            <div class="timestamp">${new Date(data.timestamp).toLocaleTimeString()}</div>
+        `;
                 grid.appendChild(card);
             });
         }
-        
+
         async function connect() {
             try {
                 updateStatus('Connecting...', 'connecting');
                 document.getElementById('connectBtn').disabled = true;
-                
+
                 // Create connection
                 connection = new signalR.HubConnectionBuilder()
                     .withUrl("/hubs/forex", {
@@ -172,13 +234,13 @@
                     })
                     .withAutomaticReconnect()
                     .build();
-                
+
                 // Set up event handlers
                 connection.on("PriceUpdate", function (tick) {
-                    log(`Price update: ${tick.symbol} = $${tick.price}`);
                     updatePrice(tick.symbol, tick.price, tick.ts);
+                    log(`Price update: ${tick.symbol} = $${tick.price}`);
                 });
-                
+
                 connection.onclose(function (error) {
                     updateStatus('Disconnected', 'disconnected');
                     document.getElementById('connectBtn').disabled = false;
@@ -189,37 +251,37 @@
                         log('Connection closed');
                     }
                 });
-                
+
                 connection.onreconnecting(function () {
                     updateStatus('Reconnecting...', 'connecting');
                     log('Reconnecting...');
                 });
-                
+
                 connection.onreconnected(function () {
                     updateStatus('Connected', 'connected');
                     log('Reconnected');
                 });
-                
+
                 // Start connection
                 await connection.start();
                 updateStatus('Connected', 'connected');
                 document.getElementById('disconnectBtn').disabled = false;
                 log('Connected to SignalR hub');
-                
+
             } catch (error) {
                 updateStatus('Connection failed', 'disconnected');
                 document.getElementById('connectBtn').disabled = false;
                 log(`Connection failed: ${error}`);
             }
         }
-        
+
         async function disconnect() {
             if (connection) {
                 await connection.stop();
                 connection = null;
             }
         }
-        
+
         async function subscribe(symbol) {
             if (connection && connection.state === signalR.HubConnectionState.Connected) {
                 try {
@@ -232,11 +294,38 @@
                 log('Not connected to hub');
             }
         }
-        
+
+        async function verifyPrice(symbol) {
+            try {
+                log(`Verifying price for ${symbol}...`);
+                const response = await fetch(`/api/price/verify/${symbol}`);
+                const data = await response.json();
+                
+                if (data.ourPrice && data.binancePrice) {
+                    const diff = data.differencePercent.toFixed(2);
+                    log(`Price verification for ${symbol}:`);
+                    log(`  Our price: $${data.ourPrice.toFixed(2)}`);
+                    log(`  Binance price: $${data.binancePrice.toFixed(2)}`);
+                    log(`  Difference: ${diff}%`);
+                    
+                    if (data.differencePercent > 1) {
+                        log(`⚠️ WARNING: Large price difference detected!`);
+                    } else {
+                        log(`✅ Price is accurate`);
+                    }
+                } else {
+                    log(`❌ Could not verify price - missing data`);
+                }
+            } catch (error) {
+                log(`Error verifying price: ${error}`);
+            }
+        }
+
         // Auto-connect on page load
-        window.onload = function() {
+        window.onload = function () {
             log('Page loaded. Click Connect to start receiving price updates.');
         };
     </script>
 </body>
+
 </html>

@@ -96,6 +96,9 @@ builder.Services.AddCors(options =>
     });
 });
 
+// HTTP Client for price verification
+builder.Services.AddHttpClient();
+
 // Background services
 builder.Services.AddHostedService<FinnhubIngestService>();
 builder.Services.AddHostedService<BroadcastService>();
